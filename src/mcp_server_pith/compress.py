@@ -9,7 +9,12 @@ Usage:
     python3 compress.py --payload "<text>" --json
 """
 
-import sys, re, json, math, argparse, heapq
+import sys
+import re
+import json
+import math
+import argparse
+import heapq
 from collections import Counter
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -18,13 +23,13 @@ if hasattr(sys.stdin, "reconfigure"):
     sys.stdin.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
 # ── Configuration ────────────────────────────────────────────────────
-DEFAULT_RATIO      = 0.60   # Keep top 60% of sentences by density
-BENFORD_TOLERANCE  = 2.0    # Max MAD multiplier before Benford gate triggers
-MIN_SENTENCES      = 5      # Pass through if fewer sentences than this
-DENSE_WORD_CHARS   = 7      # Words >= N chars = rare = high information proxy
-MAX_RETRIES        = 3      # Benford gate retry attempts
+DEFAULT_RATIO = 0.60   # Keep top 60% of sentences by density
+BENFORD_TOLERANCE = 2.0    # Max MAD multiplier before Benford gate triggers
+MIN_SENTENCES = 5      # Pass through if fewer sentences than this
+DENSE_WORD_CHARS = 7      # Words >= N chars = rare = high information proxy
+MAX_RETRIES = 3      # Benford gate retry attempts
 
-BENFORD = {d: math.log10(1 + 1/d) * 100 for d in range(1, 10)}
+BENFORD = {d: math.log10(1 + 1 / d) * 100 for d in range(1, 10)}
 
 STOPWORDS = set("""
 a about above after again against all am an and any are as at be because been before
@@ -36,8 +41,6 @@ those through to too under until up very was we were what when where which while
 whose why will with would you your yours
 """.split())
 
-# Long words that are common/procedural — don't count as dense even if >= DENSE_WORD_CHARS.
-# These frequently appear in filler sentences ("no errors encountered", "completed successfully").
 COMMON_LONG_WORDS = {
     "encountered", "completed", "successfully", "produced", "happened",
     "computation", "discussed", "following", "together", "available",
@@ -45,7 +48,6 @@ COMMON_LONG_WORDS = {
     "retrieved", "processed", "sequentially", "executed",
 }
 
-# Sentence patterns that indicate filler / hedging — score is multiplied down.
 FILLER_PATTERNS = re.compile(
     r"^(i believe\b|i think\b|i found\b|i searched\b|i need to\b|i am\b"
     r"|the search (was|is|has been|returned|completed)\b"
@@ -53,13 +55,8 @@ FILLER_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# ── Pre-compiled regexes (module-level: compiled once, reused every call) ─
 _STRIP_NON_ALPHA = re.compile(r'[^a-zA-Z\s]')
-_SPLIT_SENT_RE   = re.compile(r'(?<=[.!?])\s+(?=[A-Z-￿])')
-
-# ── Content Preservation ─────────────────────────────────────────────
-# These patterns are extracted BEFORE compression and restored AFTER.
-# Code, JSON, URLs, paths, numbers are never touched.
+_SPLIT_SENT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-ZÀ-ɏ])')
 
 PRESERVE_PATTERNS = [
     ("code_block",  re.compile(r"```[\s\S]*?```")),
@@ -70,6 +67,7 @@ PRESERVE_PATTERNS = [
     ("filepath",    re.compile(r"(?:/[\w.\-_]+){2,}")),
     ("xml_tag",     re.compile(r"<[a-zA-Z][^>]*>[\s\S]*?</[a-zA-Z]+>")),
 ]
+
 
 def extract_preserved(text):
     preserved = {}
@@ -86,17 +84,15 @@ def extract_preserved(text):
 
     return text, preserved
 
+
 def restore_preserved(text, preserved):
     for key, value in preserved.items():
         text = text.replace(key, value)
     return text
 
-# ── Sentence Splitting ───────────────────────────────────────────────
 
 def split_sentences(text):
-    # Split on sentence-ending punctuation followed by space + capital
     raw = _SPLIT_SENT_RE.split(text.strip())
-    # Also split on newline-separated items (bullet points, numbered lists)
     result = []
     for part in raw:
         lines = part.split('\n')
@@ -106,24 +102,15 @@ def split_sentences(text):
                 result.append(line)
     return result
 
-# ── Zipf Density Scoring ─────────────────────────────────────────────
 
 def zipf_density(sentence):
-    """
-    Score a sentence's information density using word length as Zipf proxy.
-
-    Rare words (specific, technical, uncommon) are systematically longer.
-    Words >= DENSE_WORD_CHARS characters = high information content.
-
-    Returns float 0.0–1.0. Higher = more information-dense.
-    """
+    """Score sentence information density using word length as Zipf proxy."""
     words = _STRIP_NON_ALPHA.sub(' ', sentence.lower()).split()
     content = [w for w in words if w not in STOPWORDS and len(w) > 2]
 
     if not content:
         return 0.0
 
-    # Single pass: accumulate dense count and total length together
     n_dense = 0
     total_len = 0
     for w in content:
@@ -133,25 +120,16 @@ def zipf_density(sentence):
             n_dense += 1
     mean_len = total_len / len(content)
 
-    # Weighted combination: fraction dense (60%) + normalized mean length (40%)
     score = (n_dense / len(content)) * 0.6 + min(mean_len / 12.0, 1.0) * 0.4
 
-    # Penalize first-person hedging and procedural filler sentences
     if FILLER_PATTERNS.match(sentence.strip()):
         score *= 0.25
 
     return round(min(score, 1.0), 4)
 
-# ── Benford Validation ───────────────────────────────────────────────
 
 def benford_mad(sentences):
-    """
-    Mean Absolute Deviation of sentence-length first-digit distribution
-    from Benford's Law expected distribution.
-
-    Natural text: MAD < 6%
-    AI/over-compressed text: MAD > 7%
-    """
+    """Mean Absolute Deviation of sentence-length first-digit distribution from Benford's Law."""
     lengths = []
     for s in sentences:
         parts = s.split()
@@ -168,7 +146,6 @@ def benford_mad(sentences):
         2
     )
 
-# ── Core Compression ─────────────────────────────────────────────────
 
 def compress(text, target_ratio=DEFAULT_RATIO):
     """
@@ -188,56 +165,45 @@ def compress(text, target_ratio=DEFAULT_RATIO):
         "benford_ok": True,
     }
 
-    # ── Step 1: Extract preserved blocks ────────────────────────────
     working, preserved = extract_preserved(text)
     n_preserved = len(preserved)
 
-    # ── Step 2: Split into sentences ────────────────────────────────
     sentences = split_sentences(working)
 
-    # ── Step 3: Passthrough for short payloads ──────────────────────
     if len(sentences) < MIN_SENTENCES:
         passthrough_meta["reason"] = f"only {len(sentences)} sentences (< {MIN_SENTENCES})"
         passthrough_meta["benford_mad"] = benford_mad(sentences)
         passthrough_meta["preserved_blocks"] = n_preserved
         return text, passthrough_meta
 
-    # ── Step 4: Score each sentence ──────────────────────────────────
     scored = [(i, s, zipf_density(s)) for i, s in enumerate(sentences)]
     original_mad = benford_mad(sentences)
     keep_n = max(2, round(len(sentences) * target_ratio))
 
-    # ── Step 5: Benford gate loop ────────────────────────────────────
-    kept_sentences = sentences  # fallback
+    kept_sentences = sentences
     compressed_mad = original_mad
     candidate: list[str] = []
     candidate_mad: float = original_mad
 
     for attempt in range(MAX_RETRIES):
-        # heapq.nlargest is O(n log k) vs sorted O(n log n) — faster when k << n
         top = heapq.nlargest(keep_n, scored, key=lambda x: x[2])
-        # Restore original sentence order
         kept_indices = sorted(x[0] for x in top)
         candidate = [sentences[i] for i in kept_indices]
         candidate_mad = benford_mad(candidate)
 
         if original_mad > 0 and candidate_mad > original_mad * BENFORD_TOLERANCE:
-            # Over-compressed — add 2 more sentences and retry
             keep_n = min(len(sentences), keep_n + 2)
         else:
             kept_sentences = candidate
             compressed_mad = candidate_mad
             break
     else:
-        # All retries exhausted — use last candidate
         kept_sentences = candidate
         compressed_mad = candidate_mad
 
-    # ── Step 6: Reassemble ────────────────────────────────────────────
     compressed_working = " ".join(kept_sentences)
     compressed_text = restore_preserved(compressed_working, preserved)
 
-    # Ensure critical preserved blocks not lost (e.g. code at end)
     for key, value in preserved.items():
         if key not in compressed_working:
             compressed_text += f"\n{value}"
@@ -261,11 +227,10 @@ def compress(text, target_ratio=DEFAULT_RATIO):
 
     return compressed_text, meta
 
-# ── CLI ────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="PITH — Inter-Agent Payload Compressor",
+        description="PITH - Inter-Agent Payload Compressor",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -277,12 +242,11 @@ Examples:
     parser.add_argument("--payload", type=str,
                         help="Text to compress (alternative to stdin)")
     parser.add_argument("--ratio", type=float, default=DEFAULT_RATIO,
-                        help=f"Target sentence keep ratio 0.0–1.0 (default: {DEFAULT_RATIO})")
+                        help=f"Target sentence keep ratio 0.0-1.0 (default: {DEFAULT_RATIO})")
     parser.add_argument("--json", action="store_true",
                         help="Output full JSON with compressed text + metadata")
     args = parser.parse_args()
 
-    # Read input
     if args.payload:
         text = args.payload
     elif not sys.stdin.isatty():
@@ -297,12 +261,10 @@ Examples:
               file=sys.stderr)
         sys.exit(1)
 
-    # Validate ratio
     if not 0.1 <= args.ratio <= 1.0:
         print("Error: --ratio must be between 0.1 and 1.0", file=sys.stderr)
         sys.exit(1)
 
-    # Run compression
     compressed, meta = compress(text, target_ratio=args.ratio)
 
     if args.json:
@@ -315,6 +277,7 @@ Examples:
         header = f"[PITH | {benford_icon} | -{saved:.0f}% tokens | benford:{b_mad:.1f}% | {action}]"
         print(header)
         print(compressed)
+
 
 if __name__ == "__main__":
     main()

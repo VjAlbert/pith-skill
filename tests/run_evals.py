@@ -8,9 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 EVALS = Path(__file__).parent / "evals.json"
 
-sys.path.insert(0, str(ROOT / "scripts"))
-
-from compress import compress, DEFAULT_RATIO
+from mcp_server_pith.compress import compress, DEFAULT_RATIO
 
 
 def extract_ratio(prompt: str) -> float:
