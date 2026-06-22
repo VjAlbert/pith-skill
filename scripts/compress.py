@@ -208,6 +208,8 @@ def compress(text, target_ratio=DEFAULT_RATIO):
     # ── Step 5: Benford gate loop ────────────────────────────────────
     kept_sentences = sentences  # fallback
     compressed_mad = original_mad
+    candidate: list[str] = []
+    candidate_mad: float = original_mad
 
     for attempt in range(MAX_RETRIES):
         # heapq.nlargest is O(n log k) vs sorted O(n log n) — faster when k << n
