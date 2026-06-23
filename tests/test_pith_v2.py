@@ -113,10 +113,10 @@ class TestShannonThreshold:
             assert meta["saved_pct"] > 0, "Expected token reduction on diverse text"
 
     def test_log_cache_populated_after_compression(self):
-        compress_mod.LOG_CACHE.clear()
+        compress_mod._log2.cache_clear()
         text = diverse_long_text()
         compress(text, target_ratio=0.7)
-        assert len(compress_mod.LOG_CACHE) > 0, "LOG_CACHE never populated"
+        assert compress_mod._log2.cache_info().currsize > 0, "_log2 lru_cache never populated"
 
     def test_logical_whitelist_always_kept(self):
         assert "not"   in LOGICAL_WHITELIST

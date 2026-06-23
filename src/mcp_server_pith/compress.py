@@ -5,7 +5,7 @@ Shannon local information scoring + Benford structural validation
 
 Pipeline:
   1. Size gate  (< 10000 chars → passthrough)
-  2. LOG_CACHE  O(1) lookup table for log2
+  2. _log2()    O(1) lru_cache for log2 lookups
   3. Shannon    local profiling  I(w) = -log2(P(w))
   4. Whitelist  logical connectors always preserved
   5. Pruning    adaptive token pruning by information threshold
@@ -19,6 +19,7 @@ import re
 import json
 import math
 import argparse
+import functools
 from collections import Counter
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -30,22 +31,15 @@ if hasattr(sys.stdin, "reconfigure"):
 SIZE_GATE         = 10000   # chars; payloads below this pass through unchanged
 DEFAULT_RATIO     = 0.70    # keep ratio → target_reduction = 1 - ratio = 0.30
 BENFORD_TOLERANCE = 2.0     # MAD multiplier before Benford gate fires
-MIN_SENTENCES     = 3       # minimum sentence count to attempt compression
+MIN_SENTENCES     = 5       # minimum sentence count to attempt compression (≥5 for benford_mad to be non-zero)
 MAX_RETRIES       = 3       # Benford gate retry cap
 _VERSION          = "2.0"
 _ENGINE           = "shannon_local"
 
-# ── Log2 Lookup Table (LUT) ───────────────────────────────────────────
-# Integers (word counts) are cached at C level; avoids repeated log calls.
-LOG_CACHE: dict[int, float] = {}
-
-
+# ── Log2 LRU Cache ────────────────────────────────────────────────────
+@functools.lru_cache(maxsize=8192)
 def _log2(n: int) -> float:
-    v = LOG_CACHE.get(n)
-    if v is None:
-        v = math.log2(n) if n > 0 else 0.0
-        LOG_CACHE[n] = v
-    return v
+    return math.log2(n) if n > 0 else 0.0
 
 
 # ── Benford Reference Distribution ────────────────────────────────────
@@ -85,7 +79,7 @@ PRESERVE_PATTERNS = [
     ("json_arr",    re.compile(r"\[[^\[\]]{10,}\]")),
     ("url",         re.compile(r"https?://\S+")),
     ("filepath",    re.compile(r"(?:/[\w.\-_]+){2,}")),
-    ("xml_tag",     re.compile(r"<[a-zA-Z][^>]*>[\s\S]*?</[a-zA-Z]+>")),
+    ("xml_tag",     re.compile(r"<[a-zA-Z_][^>]*>[\s\S]*?</[a-zA-Z_]+>")),
 ]
 
 _SPLIT_SENT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-ZÀ-ɏ])")
@@ -129,7 +123,7 @@ def split_sentences(text: str) -> list[str]:
 
 
 def _compute_shannon(words: list[str]) -> dict[str, float]:
-    """I(w) = -log2(P(w)) via LOG_CACHE LUT."""
+    """I(w) = -log2(P(w)) via lru_cache."""
     total = len(words)
     if total == 0:
         return {}
@@ -218,7 +212,7 @@ def compress(text: str, target_ratio: float = DEFAULT_RATIO) -> tuple[str, dict]
 
     original_mad = benford_mad(sentences)
 
-    # 3. Shannon local profiling via LOG_CACHE LUT
+    # 3. Shannon local profiling via _log2 lru_cache
     all_words  = [w.lower() for w in _WORD_RE.findall(working)]
     info       = _compute_shannon(all_words)
     all_scores = sorted(info.get(w, 0.0) for w in all_words)  # computed once
@@ -226,6 +220,9 @@ def compress(text: str, target_ratio: float = DEFAULT_RATIO) -> tuple[str, dict]
     pruned: list[str]  = sentences
     compressed_mad     = original_mad
     current_reduction  = target_reduction
+
+    # Pre-compute per-sentence negation counts — invariant across Benford retries
+    orig_negations = {i: _count_negations(sent) for i, sent in enumerate(sentences)}
 
     for _attempt in range(MAX_RETRIES):
         if not all_scores:
@@ -236,12 +233,12 @@ def compress(text: str, target_ratio: float = DEFAULT_RATIO) -> tuple[str, dict]
 
         # 5+6. Token pruning with filler pre-pass and polarity micro-checksum
         pruned = []
-        for sent in sentences:
+        for i, sent in enumerate(sentences):
             # Sentence-level filler removal (procedural / hedging boilerplate)
             if FILLER_PATTERNS.match(sent.strip()):
                 continue  # drop whole sentence; polarity check is for token pruning only
 
-            neg_before = _count_negations(sent)
+            neg_before = orig_negations[i]
             candidate  = _prune_tokens(sent, info, threshold)
             neg_after  = _count_negations(candidate)
             if neg_before != neg_after or not candidate.strip():
