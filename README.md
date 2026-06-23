@@ -60,24 +60,19 @@ Applied to language: a word appearing with frequency *P(w) = count(w) / total* c
 
 Tokens below the information threshold (determined by `target_reduction`) are pruned. Tokens at or above the threshold are kept.
 
-### Why the Lookup Table Eliminates Computational Latency
+### Why the Bounded LRU Cache Eliminates Computational Latency
 
 Every Shannon computation calls `log₂`. In Python, `math.log2(n)` involves a C-level function call with floating-point arithmetic — fast, but called thousands of times for a large payload.
 
-PITH v2 uses a **global LOG_CACHE dictionary** (`dict[int, float]`):
+PITH v2 memoises integer word counts with a **bounded `functools.lru_cache`**:
 
 ```python
-LOG_CACHE: dict[int, float] = {}
-
+@functools.lru_cache(maxsize=8192)
 def _log2(n: int) -> float:
-    v = LOG_CACHE.get(n)
-    if v is None:
-        v = math.log2(n) if n > 0 else 0.0
-        LOG_CACHE[n] = v
-    return v
+    return math.log2(n) if n > 0 else 0.0
 ```
 
-Word counts are always integers. The dictionary lookup is O(1) at the C level — Python's dict is a hash map with C-implemented `get()`. After the first call for a given count, every subsequent call for the same count is a pure hash lookup with no floating-point computation. Across a 500-word payload with repeated word frequencies, this eliminates the majority of `math.log2` calls.
+Word counts are always integers. After the first call for a given count, every subsequent call returns the cached float — no floating-point computation. `maxsize=8192` caps memory usage at a fixed bound regardless of how many documents the MCP server processes, providing automatic eviction of least-recently-used entries.
 
 This keeps PITH v2 in Python stdlib — no NumPy, no external dependencies — while matching the performance of native implementations for realistic payload sizes.
 
@@ -120,8 +115,8 @@ INPUT PAYLOAD (verbose agent output)
 ┌────────────────────────────────────────────────┐
 │  3. SHANNON LOCAL PROFILING                    │
 │     Count word frequencies in payload          │
-│     I(w) = log₂(total) - LOG_CACHE[count(w)]  │
-│     O(1) log2 via global LUT                   │
+│     I(w) = log₂(total) - _log2(count(w))      │
+│     O(1) log2 via lru_cache(maxsize=8192)      │
 └─────────────────────┬──────────────────────────┘
                       │
                       ▼
@@ -165,7 +160,7 @@ OUTPUT:
 
 **Passthrough conditions** (PITH skips compression automatically):
 - Payload below 10 000 chars (size gate — guarantees Benford stability and positive ROI)
-- Fewer than 3 sentences after parsing
+- Fewer than 5 sentences after parsing
 - Input is pure JSON or pure code (fully quarantined, nothing to compress)
 
 ---
@@ -175,7 +170,7 @@ OUTPUT:
 | Module | Role | Key Mechanism |
 |--------|------|---------------|
 | **Size Gate** | Fast-exit for sub-threshold payloads | `len(text) < 10000` — ensures Benford stability (≥100 sentences) and positive compute ROI |
-| **Shannon LUT** | O(1) log₂ lookups | Global `LOG_CACHE: dict[int, float]` indexed by word count |
+| **Shannon LUT** | O(1) log₂ lookups | `@functools.lru_cache(maxsize=8192)` on `_log2(n: int)` |
 | **Filler Pre-Pass** | Sentence-level boilerplate removal | `FILLER_PATTERNS` regex: *"I believe"*, *"No errors"*, *"The search was"*, etc. |
 | **Adaptive Pruner** | Token-level information pruning | Threshold = `all_scores[int(reduction × N)]`; keep if `I(w) >= threshold` |
 | **Syntactic Cage** | Logical connectors always kept | `LOGICAL_WHITELIST`: if, not, never, nor, but, because, and, or, etc. |
@@ -426,7 +421,7 @@ python3 tests/run_evals.py
 | Test class | What it verifies |
 |------------|-----------------|
 | `TestSizeGate` | Payloads < 300 chars return unchanged in < 1ms |
-| `TestShannonIntegrity` | Rare words (acronyms, technical terms) survive pruning; LOG_CACHE populated |
+| `TestShannonIntegrity` | Rare words (acronyms, technical terms) survive pruning; `_log2` lru_cache populated |
 | `TestPolarityProtection` | Whitelist words never pruned; negation particles preserved; rollback triggers |
 | `TestBenfordGate` | No infinite loop; retries bounded by `MAX_RETRIES`; threshold halves on failure |
 | `TestMetaContextReceptor` | Output wrapped in `<pith_optimization_layer>` XML with version and engine attrs |
@@ -463,7 +458,7 @@ PITH fills the gap no other tool targets: the payload exchanged *between* agents
 
 Key differentiators:
 - Zero external dependencies (no model call, no corpus, no API)
-- O(1) log₂ via global LOG_CACHE — deterministic, fast, pure Python stdlib
+- O(1) log₂ via `functools.lru_cache` — deterministic, bounded memory, pure Python stdlib
 - Logical whitelist protects connectors; polarity checksum prevents meaning inversion
 - Structural integrity gate prevents over-compression (Benford MAD)
 - Works on any text without training or adaptation
@@ -472,7 +467,7 @@ Key differentiators:
 
 ## Limitations
 
-- Requires ≥ 3 sentences for meaningful compression; shorter payloads pass through unchanged
+- Requires ≥ 5 sentences for meaningful compression; shorter payloads pass through unchanged
 - Shannon scoring is local to the payload — a word rare in the input but common globally still scores as rare
 - Benford validation is most reliable on texts with 8+ sentences
 - Not suitable for legally sensitive content where exact phrasing is contractually required
@@ -506,7 +501,7 @@ pith-skill/
 │   └── mcp_server_pith/     # MCP server package (pip-installable)
 │       ├── __init__.py
 │       ├── __main__.py
-│       ├── compress.py      # Core v2 compression logic (Shannon LUT + Benford gate)
+│       ├── compress.py      # Core v2 compression logic (Shannon lru_cache + Benford gate)
 │       └── server.py        # MCP tool registration + JSON-RPC handler
 ├── scripts/
 │   └── compress.py          # Standalone CLI (same v2 logic, no install required)
