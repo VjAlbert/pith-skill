@@ -252,7 +252,7 @@ class TestBenfordGate:
 
         # Multiple iterations must have occurred and threshold must have changed
         unique_thresholds = set(round(t, 6) for t in threshold_history)
-        assert len(unique_thresholds) >= 1  # at minimum ran once
+        assert len(unique_thresholds) >= 2  # halving must produce distinct thresholds across attempts
 
 
 # ── Test 5: Polarity Protection ───────────────────────────────────────

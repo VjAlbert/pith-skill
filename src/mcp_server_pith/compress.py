@@ -4,7 +4,7 @@ PITH v2 — Inter-Agent Payload Compressor
 Shannon local information scoring + Benford structural validation
 
 Pipeline:
-  1. Size gate  (< 1500 chars → passthrough)
+  1. Size gate  (< 10000 chars → passthrough)
   2. LOG_CACHE  O(1) lookup table for log2
   3. Shannon    local profiling  I(w) = -log2(P(w))
   4. Whitelist  logical connectors always preserved
